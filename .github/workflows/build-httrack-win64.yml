@@ -1,7 +1,7 @@
 name: Build HTTrack Win64 Portable
 
 on:
-  workflow_dispatch:        # 手动触发
+  workflow_dispatch:
   push:
     tags:
       - 'build-*'
@@ -15,11 +15,9 @@ jobs:
         shell: msys2 {0}
 
     steps:
-      # ── 1. 检出 ────────────────────────────────────────────────────────────
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      # ── 2. 配置 MSYS2 MINGW64 环境 ────────────────────────────────────────
       - name: Setup MSYS2 MINGW64
         uses: msys2/setup-msys2@v2
         with:
@@ -38,55 +36,36 @@ jobs:
             mingw-w64-x86_64-pkg-config
             mingw-w64-x86_64-ntldd-git
 
-      # ── 3. 拉取 HTTrack 最新源码 ──────────────────────────────────────────
-      - name: Clone HTTrack source
+      - name: Clone and build HTTrack
         run: |
-          git clone https://github.com/xroche/httrack.git --recurse --depth=1
-          cd httrack
-          echo "HTTrack source version: $(git describe --tags --always)"
-
-      # ── 4. 编译（V=1 输出完整命令，便于排错）─────────────────────────────
-      - name: Configure and build
-        run: |
+          git clone https://github.com/xroche/httrack.git --recurse
           cd httrack
           autoreconf -fi
-          ./configure \
-            --prefix=/mingw64 \
-            --disable-static \
-            --enable-shared \
-            --host=x86_64-w64-mingw32 \
-            CFLAGS="-O2 -march=x86-64 -w -Dtimegm=mktime" \
-            LDFLAGS="-Wl,-s"
-          make -j$(nproc) V=1 2>&1 | tee /tmp/build.log || {
-            echo "==== 编译失败，最后 100 行错误 ===="
-            tail -100 /tmp/build.log
-            exit 1
-          }
+          CFLAGS="-Dtimegm=mktime -w" \
+            ./configure --prefix=$HOME/usr \
+            && make -j8 \
+            && make install
 
-      # ── 5. 收集二进制和依赖 DLL，打包为免安装 zip ─────────────────────────
       - name: Package portable zip
         run: |
           set -e
           OUTDIR="httrack-win64-portable"
           MINGW_BIN="/mingw64/bin"
+          INST="$HOME/usr"
           mkdir -p "$OUTDIR"
 
-          # 找并复制所有编译产出的 exe 和 dll
-          find httrack/src -name "*.exe" -o -name "htshlib*.dll" | while read f; do
-            cp -v "$f" "$OUTDIR/" 2>/dev/null || true
-          done
-          # libtool 有时把真正的 exe 放在 .libs/
-          find httrack/src/.libs -maxdepth 1 \( -name "*.exe" -o -name "*.dll" \) 2>/dev/null | while read f; do
-            cp -nv "$f" "$OUTDIR/" 2>/dev/null || true
-          done
+          # 复制编译产出
+          cp -v "$INST/bin/"*.exe "$OUTDIR/" 2>/dev/null || true
+          cp -v "$INST/bin/"*.dll "$OUTDIR/" 2>/dev/null || true
+          cp -v "$INST/lib/httrack/"*.dll "$OUTDIR/" 2>/dev/null || true
 
           echo "=== 编译产出 ==="
           ls -lh "$OUTDIR"
 
-          # 用 ntldd 递归找出所有 MINGW64 的运行时 DLL 依赖
-          for exe in "$OUTDIR"/*.exe "$OUTDIR"/*.dll; do
-            [ -f "$exe" ] || continue
-            ntldd -R "$exe" 2>/dev/null \
+          # 用 ntldd 收集所有 MINGW64 运行时 DLL
+          for f in "$OUTDIR"/*.exe "$OUTDIR"/*.dll; do
+            [ -f "$f" ] || continue
+            ntldd -R "$f" 2>/dev/null \
               | grep -i 'mingw64' \
               | awk '{print $3}' \
               | while read dll; do
@@ -94,47 +73,27 @@ jobs:
                 done
           done
 
-          # 手动兜底补充核心 DLL
+          # 兜底补充核心 DLL
           for dll in \
-            libssl-3-x64.dll \
-            libcrypto-3-x64.dll \
-            libgcc_s_seh-1.dll \
-            libwinpthread-1.dll \
-            libz-1.dll \
-            libstdc++-6.dll \
-            libiconv-2.dll \
-            libintl-8.dll; do
-            src="$MINGW_BIN/$dll"
-            [ -f "$src" ] && cp -nv "$src" "$OUTDIR/" && echo "Bundled: $dll" || true
+            libssl-3-x64.dll libcrypto-3-x64.dll \
+            libgcc_s_seh-1.dll libwinpthread-1.dll \
+            libz-1.dll libstdc++-6.dll; do
+            [ -f "$MINGW_BIN/$dll" ] && cp -nv "$MINGW_BIN/$dll" "$OUTDIR/" || true
           done
 
-          # 写入 README
-          printf 'HTTrack Win64 Portable - built by GitHub Actions\n' > "$OUTDIR/README.txt"
-          printf '=================================================\n' >> "$OUTDIR/README.txt"
-          printf 'Usage: httrack.exe <URL> -O <output_dir> [options]\n' >> "$OUTDIR/README.txt"
-          printf 'Example: httrack.exe https://example.com -O C:\\mirror -r3\n' >> "$OUTDIR/README.txt"
-          printf 'Proxy:   httrack.exe https://example.com -O C:\\mirror -P 127.0.0.1:1082\n' >> "$OUTDIR/README.txt"
-          printf 'Help:    httrack.exe --help\n' >> "$OUTDIR/README.txt"
-          printf 'Docs:    https://www.httrack.com/html/fcguide.html\n' >> "$OUTDIR/README.txt" 
-
-          echo "=== 最终打包文件列表 ==="
+          echo "=== 最终文件列表 ==="
           ls -lh "$OUTDIR"
 
-      # ── 6. Smoke test ─────────────────────────────────────────────────────
       - name: Smoke test
         shell: cmd
-        run: |
-          httrack-win64-portable\httrack.exe --version
+        run: httrack-win64-portable\httrack.exe --version
 
-      # ── 7. 压缩 ───────────────────────────────────────────────────────────
       - name: Zip artifact
         shell: pwsh
         run: |
-          Compress-Archive -Path httrack-win64-portable\* `
-            -DestinationPath "httrack-win64-portable.zip"
-          Write-Host "Zip size: $((Get-Item httrack-win64-portable.zip).Length / 1MB) MB"
+          Compress-Archive -Path httrack-win64-portable\* -DestinationPath httrack-win64-portable.zip
+          Write-Host "Size: $([math]::Round((Get-Item httrack-win64-portable.zip).Length/1MB,2)) MB"
 
-      # ── 8. 上传 Artifact（保留 30 天）────────────────────────────────────
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -142,32 +101,13 @@ jobs:
           path: httrack-win64-portable.zip
           retention-days: 30
 
-      # ── 9. 上传完整编译日志（方便排错）──────────────────────────────────
-      - name: Upload build log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-log
-          path: /tmp/build.log
-          retention-days: 7
-
-      # ── 10. tag 触发则发布 Release ────────────────────────────────────────
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: httrack-win64-portable.zip
           body: |
-            ## HTTrack Win64 Portable
-
-            基于 [xroche/httrack](https://github.com/xroche/httrack) 最新源码，
-            通过 MSYS2 MINGW64 + 最新 OpenSSL 编译，解决旧版 WinHTTrack 的 TLS/DH 握手问题。
-
-            ### 使用
-            解压后直接运行 `httrack.exe`，无需安装。
-
-            ```
-            httrack.exe https://目标网站 -O C:\本地目录 -r3
-            ```
+            HTTrack Win64 Portable, built with MSYS2 MINGW64 + latest OpenSSL.
+            Unzip and run httrack.exe directly, no installation needed.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
