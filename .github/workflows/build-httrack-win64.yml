@@ -109,21 +109,13 @@ jobs:
           done
 
           # 写入 README
-          cat > "$OUTDIR/README.txt" << 'EOF'
-HTTrack Win64 Portable — built by GitHub Actions
-=================================================
-使用方法：
-  httrack.exe <URL> -O <输出目录> [选项]
-
-示例（整站下载）：
-  httrack.exe https://example.com -O C:\mirror -r3
-
-带代理示例：
-  httrack.exe https://example.com -O C:\mirror -P 127.0.0.1:1082
-
-更多选项：httrack.exe --help
-官方文档：https://www.httrack.com/html/fcguide.html
-EOF
+          printf 'HTTrack Win64 Portable - built by GitHub Actions\n' > "$OUTDIR/README.txt"
+          printf '=================================================\n' >> "$OUTDIR/README.txt"
+          printf 'Usage: httrack.exe <URL> -O <output_dir> [options]\n' >> "$OUTDIR/README.txt"
+          printf 'Example: httrack.exe https://example.com -O C:\\mirror -r3\n' >> "$OUTDIR/README.txt"
+          printf 'Proxy:   httrack.exe https://example.com -O C:\\mirror -P 127.0.0.1:1082\n' >> "$OUTDIR/README.txt"
+          printf 'Help:    httrack.exe --help\n' >> "$OUTDIR/README.txt"
+          printf 'Docs:    https://www.httrack.com/html/fcguide.html\n' >> "$OUTDIR/README.txt" 
 
           echo "=== 最终打包文件列表 ==="
           ls -lh "$OUTDIR"
