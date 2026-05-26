@@ -28,6 +28,7 @@ jobs:
           install: >-
             git
             autoconf
+            autoconf-archive
             automake
             libtool
             make
