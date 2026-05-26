@@ -1,0 +1,162 @@
+name: Build HTTrack Win64 Portable
+
+on:
+  workflow_dispatch:        # 手动触发
+  push:
+    tags:
+      - 'build-*'           # 或推送 tag 触发，如 git tag build-1 && git push --tags
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: msys2 {0}   # 所有 run 步骤默认在 MSYS2 shell 中执行
+
+    steps:
+      # ── 1. 检出（仅用于触发，httrack 源码从 GitHub 拉取）──────────────────
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      # ── 2. 配置 MSYS2 MINGW64 环境 ────────────────────────────────────────
+      - name: Setup MSYS2 MINGW64
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git
+            autoconf
+            automake
+            libtool
+            make
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-openssl
+            mingw-w64-x86_64-zlib
+            mingw-w64-x86_64-pkg-config
+            mingw-w64-x86_64-ntldd-git
+
+      # ── 3. 拉取 HTTrack 最新源码 ──────────────────────────────────────────
+      - name: Clone HTTrack source
+        run: |
+          git clone https://github.com/xroche/httrack.git --recurse --depth=1
+          cd httrack
+          echo "HTTrack source version: $(git describe --tags --always)"
+
+      # ── 4. 编译 ───────────────────────────────────────────────────────────
+      - name: Configure and build
+        run: |
+          cd httrack
+          autoreconf -fi
+          ./configure \
+            --prefix=/mingw64 \
+            --disable-static \
+            --enable-shared \
+            CFLAGS="-O2 -march=x86-64" \
+            LDFLAGS="-Wl,-s"     # -s 去掉调试符号，减小体积
+          make -j$(nproc)
+
+      # ── 5. 收集二进制和依赖 DLL，打包为免安装 zip ─────────────────────────
+      - name: Package portable zip
+        run: |
+          set -e
+          OUTDIR="httrack-win64-portable"
+          mkdir -p "$OUTDIR"
+
+          # 复制主程序
+          cp httrack/src/.libs/httrack.exe      "$OUTDIR/" 2>/dev/null || \
+          cp httrack/src/httrack.exe            "$OUTDIR/"
+
+          # 复制 htsserver（WebHTTrack 可选，有则复制）
+          cp httrack/src/.libs/htsserver.exe    "$OUTDIR/" 2>/dev/null || true
+          cp httrack/src/.libs/htshlib*.dll     "$OUTDIR/" 2>/dev/null || true
+
+          # 用 ntldd 找出所有运行时 DLL 依赖（过滤掉 Windows 系统 DLL）
+          MINGW_BIN="/mingw64/bin"
+          for exe in "$OUTDIR"/*.exe "$OUTDIR"/*.dll; do
+            [ -f "$exe" ] || continue
+            ntldd -R "$exe" 2>/dev/null \
+              | grep -i "$MINGW_BIN" \
+              | awk '{print $3}' \
+              | while read dll; do
+                  [ -f "$dll" ] && cp -n "$dll" "$OUTDIR/"
+                done
+          done
+
+          # 手动补充常见必须 DLL（ntldd 偶尔漏报）
+          for dll in \
+            libssl-3-x64.dll \
+            libcrypto-3-x64.dll \
+            libgcc_s_seh-1.dll \
+            libwinpthread-1.dll \
+            libz-1.dll \
+            libstdc++-6.dll; do
+            src="$MINGW_BIN/$dll"
+            [ -f "$src" ] && cp -n "$src" "$OUTDIR/" && echo "Bundled: $dll"
+          done
+
+          # 版本信息写入 README
+          cat > "$OUTDIR/README.txt" << 'EOF'
+          HTTrack Win64 Portable — built by GitHub Actions
+          =================================================
+          使用方法：
+            httrack.exe <URL> -O <输出目录> [选项]
+
+          示例（整站下载）：
+            httrack.exe https://example.com -O C:\mirror -r3
+
+          带代理示例：
+            httrack.exe https://example.com -O C:\mirror -P 127.0.0.1:1082
+
+          更多选项：httrack.exe --help
+          官方文档：https://www.httrack.com/html/fcguide.html
+          EOF
+
+          # 列出打包内容
+          echo "=== 打包文件列表 ==="
+          ls -lh "$OUTDIR"
+
+      # ── 6. 验证可执行（smoke test）────────────────────────────────────────
+      - name: Smoke test
+        shell: cmd
+        run: |
+          httrack-win64-portable\httrack.exe --version
+
+      # ── 7. 压缩 ───────────────────────────────────────────────────────────
+      - name: Zip artifact
+        shell: pwsh
+        run: |
+          $version = (.\httrack-win64-portable\httrack.exe --version 2>&1 | Select-String 'HTTrack').ToString().Trim()
+          Write-Host "Version string: $version"
+          Compress-Archive -Path httrack-win64-portable\* `
+            -DestinationPath "httrack-win64-portable.zip"
+
+      # ── 8. 上传 Artifact（Actions 页面可下载，保留 30 天）────────────────
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: httrack-win64-portable
+          path: httrack-win64-portable.zip
+          retention-days: 30
+
+      # ── 9. 可选：如果是 tag 触发则发布 Release ────────────────────────────
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: httrack-win64-portable.zip
+          body: |
+            ## HTTrack Win64 Portable
+
+            基于 [xroche/httrack](https://github.com/xroche/httrack) 最新源码，
+            通过 MSYS2 MINGW64 + 最新 OpenSSL 编译，解决旧版 WinHTTrack 的 TLS/DH 握手问题。
+
+            ### 使用
+            解压后直接运行 `httrack.exe`，无需安装。
+
+            ```
+            httrack.exe https://目标网站 -O C:\本地目录 -r3
+            ```
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
